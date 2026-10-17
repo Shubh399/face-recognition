@@ -13,6 +13,10 @@
     <div>
       <a class="btn btn-outline-primary" href="/download_csv">Download CSV</a>
       <a class="btn btn-outline-secondary" href="/">Back</a>
+      <form method="post" action="{{ url_for('logout') }}" class="d-inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-outline-secondary" type="submit">Log out</button>
+      </form>
     </div>
   </div>
 

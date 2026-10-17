@@ -5,12 +5,15 @@ const addStudentBtn = document.getElementById("addStudentBtn");
 const video = document.getElementById("video");
 const captureStatus = document.getElementById("captureStatus");
 const progressBar = document.getElementById("progressBar");
+const detectCameraBtn = document.getElementById("detectCameraBtn");
+const cameraSelect = document.getElementById("cameraSelect");
 
 let student_id = null;
 let captured = 0;
 const maxImages = 50;
 let images = [];
 let stream = null;
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
 document.getElementById("studentForm").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -22,20 +25,39 @@ document.getElementById("studentForm").addEventListener("submit", async (e) => {
   }
   const j = await res.json();
   student_id = j.student_id;
-  alert("Student info saved. Click Start Capture to open the camera.");
+  captureStatus.innerText = "Student saved. Detect cameras, choose the laptop webcam, then start capture.";
+  detectCameraBtn.disabled = false;
   startCaptureBtn.disabled = false;
+});
+
+detectCameraBtn.addEventListener("click", async () => {
+  detectCameraBtn.disabled = true;
+  try {
+    const cameras = await CameraPicker.detect(cameraSelect);
+    const selected = cameraSelect.selectedOptions[0]?.textContent || "selected webcam";
+    captureStatus.innerText = `Found ${cameras.length} camera(s). Selected: ${selected}. Choose your laptop webcam if needed.`;
+  } catch (err) {
+    captureStatus.innerText = err.message || "Could not detect webcams.";
+  } finally {
+    detectCameraBtn.disabled = false;
+  }
 });
 
 startCaptureBtn.addEventListener("click", async () => {
   startCaptureBtn.disabled = true;
+  detectCameraBtn.disabled = true;
+  cameraSelect.disabled = true;
   try {
-    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    if (!cameraSelect.value) await CameraPicker.detect(cameraSelect);
+    stream = await CameraPicker.open(cameraSelect);
     video.srcObject = stream;
     await video.play();
     captureImagesLoop();
   } catch (err) {
-    alert("Camera access error: " + err.message);
+    captureStatus.innerText = err.message || "Could not open the selected webcam.";
     startCaptureBtn.disabled = false;
+    detectCameraBtn.disabled = false;
+    cameraSelect.disabled = false;
   }
 });
 
@@ -60,16 +82,23 @@ async function captureImagesLoop() {
   const form = new FormData();
   form.append("student_id", student_id);
   images.forEach((b, i) => form.append("images[]", b, `img_${i}.jpg`));
-  const resp = await fetch("/upload_face", { method: "POST", body: form });
-  if (resp.ok) {
-    alert("Captured images uploaded");
-    addStudentBtn.disabled = false;
-  } else {
-    alert("Upload failed");
+  try {
+    const resp = await fetch("/upload_face", {
+      method: "POST",
+      headers: { "X-CSRFToken": csrfToken },
+      body: form
+    });
+    const result = await resp.json();
+    if (!resp.ok) throw new Error(result.error || "Upload failed.");
+    captureStatus.innerText = `Saved ${result.saved} photos in the database.`;
+    addStudentBtn.disabled = result.saved === 0;
+    cameraSelect.disabled = false;
+    detectCameraBtn.disabled = false;
+  } catch (err) {
+    alert(err.message || "Could not save captured photos.");
+  } finally {
+    if (stream) stream.getTracks().forEach(t => t.stop());
   }
-
-  // stop camera
-  if (stream) stream.getTracks().forEach(t => t.stop());
 }
 
 addStudentBtn.addEventListener("click", () => {

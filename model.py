@@ -1,114 +1,138 @@
 import os
+import sqlite3
+
 import cv2
 import numpy as np
-import pickle
-from sklearn.ensemble import RandomForestClassifier
 
-MODEL_PATH = "model.pkl"
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(APP_DIR, "face_embeddings.npz")
+MODEL_DIR = os.path.join(APP_DIR, "models")
+DETECTOR_PATH = os.path.join(MODEL_DIR, "face_detection_yunet_2023mar.onnx")
+RECOGNIZER_PATH = os.path.join(MODEL_DIR, "face_recognition_sface_2021dec.onnx")
 
-# ---- Utility: extract face crop -> small grayscale vector (embedding) ----
-def crop_face_and_embed(bgr_image, detection):
-    h, w = bgr_image.shape[:2]
-    bbox = detection.location_data.relative_bounding_box
-    x1 = int(max(0, bbox.xmin * w))
-    y1 = int(max(0, bbox.ymin * h))
-    x2 = int(min(w, (bbox.xmin + bbox.width) * w))
-    y2 = int(min(h, (bbox.ymin + bbox.height) * h))
-    if x2 <= x1 or y2 <= y1:
+
+def create_face_models():
+    missing = [path for path in (DETECTOR_PATH, RECOGNIZER_PATH) if not os.path.isfile(path)]
+    if missing:
+        raise FileNotFoundError("Face models are missing. Run `python download_models.py` first.")
+    detector = cv2.FaceDetectorYN.create(
+        DETECTOR_PATH,
+        "",
+        (320, 320),
+        score_threshold=0.8,
+        nms_threshold=0.3,
+        top_k=5000,
+    )
+    recognizer = cv2.FaceRecognizerSF.create(RECOGNIZER_PATH, "")
+    return detector, recognizer
+
+
+def embedding_from_image(image, detector, recognizer):
+    if image is None or image.size == 0:
         return None
-    face = bgr_image[y1:y2, x1:x2]
-    face = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-    face = cv2.resize(face, (32,32), interpolation=cv2.INTER_AREA)
-    emb = face.flatten().astype(np.float32) / 255.0
-    return emb
+    height, width = image.shape[:2]
+    detector.setInputSize((width, height))
+    _, faces = detector.detect(image)
+    if faces is None or len(faces) == 0:
+        return None
+    face = max(faces, key=lambda detection: detection[2] * detection[3])
+    aligned = recognizer.alignCrop(image, face)
+    feature = recognizer.feature(aligned).reshape(-1).astype(np.float32)
+    norm = np.linalg.norm(feature)
+    if norm == 0:
+        return None
+    return feature / norm
+
+
+def decode_image_bytes(data):
+    if not data:
+        return None
+    return cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+
 
 def extract_embedding_for_image(stream_or_bytes):
-    # accepts a file-like stream (werkzeug FileStorage.stream)
-    import mediapipe as mp
-    mp_face = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
-    # read image from stream into numpy BGR
-    data = stream_or_bytes.read()
-    arr = np.frombuffer(data, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-    if img is None:
+    data = stream_or_bytes.read() if hasattr(stream_or_bytes, "read") else stream_or_bytes
+    image = decode_image_bytes(data)
+    if image is None:
         return None
-    results = mp_face.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    if not results.detections:
-        return None
-    emb = crop_face_and_embed(img, results.detections[0])
-    return emb
+    detector, recognizer = create_face_models()
+    return embedding_from_image(image, detector, recognizer)
 
-# ---- Load model helpers ----
+
 def load_model_if_exists():
-    if not os.path.exists(MODEL_PATH):
+    if not os.path.isfile(MODEL_PATH):
         return None
-    with open(MODEL_PATH, "rb") as f:
-        return pickle.load(f)
+    with np.load(MODEL_PATH, allow_pickle=False) as saved:
+        labels = saved["labels"].astype(np.int64)
+        embeddings = saved["embeddings"].astype(np.float32)
+    if len(labels) == 0 or embeddings.ndim != 2 or len(labels) != len(embeddings):
+        raise ValueError("Saved face embedding model is invalid.")
+    return {"labels": labels, "embeddings": embeddings}
 
-def predict_with_model(clf, emb):
-    # returns label and confidence (max probability)
-    proba = clf.predict_proba([emb])[0]
-    idx = np.argmax(proba)
-    label = clf.classes_[idx]
-    conf = float(proba[idx])
-    return label, conf
 
-# ---- Training function used in background ----
-def train_model_background(dataset_dir, progress_callback=None):
-    """
-    dataset_dir/
-        student_id/
-            img1.jpg
-            img2.jpg
-    progress_callback(progress_percent, message) -> optional
-    """
-    import mediapipe as mp
-    mp_face = mp.solutions.face_detection.FaceDetection(model_selection=1, min_detection_confidence=0.5)
+def predict_with_model(model, embedding):
+    query = np.asarray(embedding, dtype=np.float32).reshape(-1)
+    if query.size != model["embeddings"].shape[1]:
+        raise ValueError("Face embedding has an unexpected size.")
+    similarities = model["embeddings"] @ query
+    best_index = int(np.argmax(similarities))
+    return int(model["labels"][best_index]), float(similarities[best_index])
 
-    X = []
-    y = []
-    student_dirs = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
-    total_students = max(1, len(student_dirs))
-    processed = 0
 
-    for sid in student_dirs:
-        folder = os.path.join(dataset_dir, sid)
-        files = [f for f in os.listdir(folder) if f.lower().endswith((".jpg",".jpeg",".png"))]
-        for fn in files:
-            path = os.path.join(folder, fn)
-            img = cv2.imread(path)
-            if img is None:
-                continue
-            results = mp_face.process(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-            if not results.detections:
-                continue
-            emb = crop_face_and_embed(img, results.detections[0])
-            if emb is None:
-                continue
-            X.append(emb)
-            y.append(int(sid))
-        processed += 1
-        if progress_callback:
-            pct = int((processed/total_students)*80)  # training progress up to 80% during feature extraction
-            progress_callback(pct, f"Processed {processed}/{total_students} students")
+def train_model_background(database_path, progress_callback=None):
+    detector, recognizer = create_face_models()
+    with sqlite3.connect(database_path) as conn:
+        student_ids = [row[0] for row in conn.execute(
+            "SELECT DISTINCT student_id FROM student_faces ORDER BY student_id"
+        )]
+        if not student_ids:
+            raise ValueError("Add a student and capture face images before training.")
 
-    if len(X) == 0:
-        if progress_callback:
-            progress_callback(0, "No training data found")
-        return
+        grouped_embeddings = {}
+        total_students = len(student_ids)
+        processed_images = 0
+        skipped_images = 0
 
-    # convert
-    X = np.stack(X)
-    y = np.array(y)
+        for student_index, student_id in enumerate(student_ids, start=1):
+            face_rows = conn.execute(
+                "SELECT image FROM student_faces WHERE student_id = ? ORDER BY id", (student_id,)
+            )
+            for (image_bytes,) in face_rows:
+                image = decode_image_bytes(image_bytes)
+                embedding = embedding_from_image(image, detector, recognizer)
+                if embedding is None:
+                    skipped_images += 1
+                    continue
+                grouped_embeddings.setdefault(int(student_id), []).append(embedding)
+                processed_images += 1
+            if progress_callback:
+                progress = int(student_index / total_students * 80)
+                progress_callback(progress, f"Processed {student_index}/{total_students} students.")
 
-    # fit RandomForest
-    if progress_callback:
-        progress_callback(85, "Training RandomForest...")
-    clf = RandomForestClassifier(n_estimators=150, n_jobs=-1, random_state=42)
-    clf.fit(X, y)
+    if not grouped_embeddings:
+        raise ValueError("No usable faces found in the captured images.")
 
-    with open(MODEL_PATH, "wb") as f:
-        pickle.dump(clf, f)
+    labels = []
+    embeddings = []
+    for student_id, samples in grouped_embeddings.items():
+        centroid = np.mean(np.stack(samples), axis=0)
+        centroid_norm = np.linalg.norm(centroid)
+        if centroid_norm == 0:
+            continue
+        labels.append(student_id)
+        embeddings.append(centroid / centroid_norm)
+    if not embeddings:
+        raise ValueError("Could not create valid face embeddings.")
 
     if progress_callback:
-        progress_callback(100, "Training complete")
+        progress_callback(90, f"Built embeddings from {processed_images} images.")
+    temp_path = MODEL_PATH + ".tmp.npz"
+    np.savez_compressed(
+        temp_path,
+        labels=np.asarray(labels, dtype=np.int64),
+        embeddings=np.asarray(embeddings, dtype=np.float32),
+    )
+    os.replace(temp_path, MODEL_PATH)
+    if progress_callback:
+        message = f"Training complete. Used {processed_images} images; skipped {skipped_images}."
+        progress_callback(100, message)

@@ -3,6 +3,7 @@ document.addEventListener("DOMContentLoaded", () => {
   const trainBtn = document.getElementById("trainBtn");
   const trainProgress = document.getElementById("trainProgress");
   const trainMsg = document.getElementById("trainMsg");
+  const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
   async function pollStatus() {
     try {
@@ -11,6 +12,7 @@ document.addEventListener("DOMContentLoaded", () => {
       trainProgress.style.width = data.progress + "%";
       trainProgress.innerText = data.progress + "%";
       trainMsg.innerText = data.message || "";
+      trainBtn.disabled = Boolean(data.running);
       return data;
     } catch (e) {
       console.error(e);
@@ -20,23 +22,34 @@ document.addEventListener("DOMContentLoaded", () => {
 
   trainBtn.addEventListener("click", async () => {
     trainBtn.disabled = true;
-    const start = await fetch("/train_model");
+    let start;
+    try {
+      start = await fetch("/train_model", {
+        method: "POST",
+        headers: { "X-CSRFToken": csrfToken }
+      });
+    } catch (error) {
+      trainMsg.innerText = "Could not contact the server.";
+      trainBtn.disabled = false;
+      return;
+    }
     if (!start.ok && start.status !== 202) {
-      alert("Failed to start training");
+      trainMsg.innerText = "Failed to start training.";
       trainBtn.disabled = false;
       return;
     }
     trainMsg.innerText = "Training started...";
-    // poll until progress==100 or not running
-    const t = setInterval(async () => {
+    while (true) {
+      await new Promise(resolve => setTimeout(resolve, 1500));
       const s = await pollStatus();
-      if (s && s.progress >= 100) {
-        clearInterval(t);
-        trainBtn.disabled = false;
-        alert("Training completed");
+      if (!s || !s.running) {
+        if (s && s.status === "completed") alert("Training completed");
+        break;
       }
-    }, 1500);
+    }
   });
+
+  pollStatus();
 
   // Chart initial render & update every 10s
   let chart = null;

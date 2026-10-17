@@ -3,6 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="csrf-token" content="{{ csrf_token() }}">
   <title>Digital Attendance Dashboard</title>
 
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.1/dist/css/bootstrap.min.css" rel="stylesheet">
@@ -73,6 +74,10 @@
           <a class="btn btn-outline-light me-2" href="/add_student">Add Student</a>
           <a class="btn btn-outline-light me-2" href="/mark_attendance">Mark Attendance</a>
           <a class="btn btn-outline-light" href="/attendance_record">Records</a>
+          <form method="post" action="{{ url_for('logout') }}" class="ms-2">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-outline-light" type="submit">Log out</button>
+          </form>
         </div>
       </div>
     </nav>
@@ -118,6 +123,6 @@
     </div>
   </div>
 
-  <script src="static/js/dashboard.js"></script>
+  <script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
 </body>
 </html>
