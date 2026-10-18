@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.env
+attendance.db
+attendance.db-*
+dataset/
+models/
+face_embeddings.npz
+face_embeddings.npz.tmp.npz
+train_status.json
+train_status.json.tmp
