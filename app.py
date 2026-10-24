@@ -64,6 +64,35 @@ def connect_db():
 def init_db():
     with connect_db() as conn:
         conn.execute(
+            """CREATE TABLE IF NOT EXISTS classes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                class_date TEXT NOT NULL,
+                class_time TEXT NOT NULL,
+                faculty TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        class_columns = {row["name"] for row in conn.execute("PRAGMA table_info(classes)").fetchall()}
+        if "class_date" not in class_columns:
+            conn.execute("ALTER TABLE classes ADD COLUMN class_date TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                """UPDATE classes
+                   SET class_date = COALESCE(NULLIF(date(created_at), ''), date('now'))
+                   WHERE class_date = ''"""
+            )
+        if "end_time" not in class_columns:
+            conn.execute("ALTER TABLE classes ADD COLUMN end_time TEXT NOT NULL DEFAULT ''")
+            conn.execute(
+                """UPDATE classes
+                   SET end_time = CASE
+                       WHEN time(class_time, '+1 hour') IS NULL THEN '23:59'
+                       WHEN class_time >= '23:00' THEN '23:59'
+                       ELSE time(class_time, '+1 hour')
+                   END
+                   WHERE end_time = ''"""
+            )
+        conn.execute(
             """CREATE TABLE IF NOT EXISTS students (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
@@ -79,16 +108,42 @@ def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 student_id INTEGER,
                 name TEXT,
-                timestamp TEXT
+                timestamp TEXT,
+                class_id INTEGER
             )"""
         )
+        attendance_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(attendance)").fetchall()
+        }
+        if "class_id" not in attendance_columns:
+            conn.execute("ALTER TABLE attendance ADD COLUMN class_id INTEGER")
+
         conn.execute(
             """CREATE TABLE IF NOT EXISTS attendance_daily (
                 student_id INTEGER NOT NULL,
                 attendance_date TEXT NOT NULL,
-                PRIMARY KEY (student_id, attendance_date)
+                class_id INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (student_id, attendance_date, class_id)
             )"""
         )
+        daily_columns = {
+            row["name"] for row in conn.execute("PRAGMA table_info(attendance_daily)").fetchall()
+        }
+        if "class_id" not in daily_columns:
+            conn.execute("ALTER TABLE attendance_daily RENAME TO attendance_daily_legacy")
+            conn.execute(
+                """CREATE TABLE attendance_daily (
+                    student_id INTEGER NOT NULL,
+                    attendance_date TEXT NOT NULL,
+                    class_id INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY (student_id, attendance_date, class_id)
+                )"""
+            )
+            conn.execute(
+                """INSERT OR IGNORE INTO attendance_daily (student_id, attendance_date, class_id)
+                   SELECT student_id, attendance_date, 0 FROM attendance_daily_legacy"""
+            )
+            conn.execute("DROP TABLE attendance_daily_legacy")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS student_faces (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,10 +152,9 @@ def init_db():
                 created_at TEXT NOT NULL
             )"""
         )
-        # Seed the guard table without deleting or rewriting existing attendance history.
         conn.execute(
-            """INSERT OR IGNORE INTO attendance_daily (student_id, attendance_date)
-               SELECT student_id, date(timestamp) FROM attendance
+            """INSERT OR IGNORE INTO attendance_daily (student_id, attendance_date, class_id)
+               SELECT student_id, date(timestamp), COALESCE(class_id, 0) FROM attendance
                WHERE student_id IS NOT NULL AND date(timestamp) IS NOT NULL"""
         )
 
@@ -260,6 +314,81 @@ def index():
     return render_template("index.html")
 
 
+@app.route("/classes", methods=["GET", "POST"])
+def classes_page():
+    error = None
+    if request.method == "POST":
+        name = request.form.get("name", "").strip()
+        class_date = request.form.get("class_date", "").strip()
+        class_time = request.form.get("class_time", "").strip()
+        end_time = request.form.get("end_time", "").strip()
+        faculty = request.form.get("faculty", "").strip()
+        try:
+            valid_date = datetime.date.fromisoformat(class_date).isoformat() == class_date
+        except ValueError:
+            valid_date = False
+        try:
+            datetime.datetime.strptime(class_time, "%H:%M")
+            valid_time = True
+        except ValueError:
+            valid_time = False
+        try:
+            datetime.datetime.strptime(end_time, "%H:%M")
+            valid_end_time = end_time > class_time
+        except ValueError:
+            valid_end_time = False
+        if not name or not valid_date or not valid_time or not valid_end_time or not faculty:
+            error = "Provide a class name, valid date and start/end times (end after start), and faculty."
+        else:
+            created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            with connect_db() as conn:
+                conn.execute(
+                    """INSERT INTO classes (name, class_date, class_time, end_time, faculty, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?)""",
+                    (name, class_date, class_time, end_time, faculty, created_at),
+                )
+            return redirect(url_for("classes_page", created=1))
+
+    now = datetime.datetime.now()
+    today = now.date().isoformat()
+    with connect_db() as conn:
+        classes = conn.execute(
+            """SELECT c.id, c.name, c.class_date, c.class_time, c.end_time, c.faculty,
+                      COUNT(DISTINCT a.student_id) AS attended_count
+               FROM classes c
+               LEFT JOIN attendance a
+                 ON a.class_id = c.id AND date(a.timestamp) = c.class_date
+               GROUP BY c.id
+               ORDER BY c.id DESC""",
+        ).fetchall()
+    classes = [
+        {
+            **dict(class_item),
+            "schedule_status": (
+                "Past - read-only"
+                if datetime.datetime.combine(
+                    datetime.date.fromisoformat(class_item["class_date"]),
+                    datetime.time.fromisoformat(class_item["end_time"]),
+                ) <= now
+                else "Attendance open"
+                if datetime.datetime.combine(
+                    datetime.date.fromisoformat(class_item["class_date"]),
+                    datetime.time.fromisoformat(class_item["class_time"]),
+                ) <= now
+                else "Upcoming"
+            ),
+        }
+        for class_item in classes
+    ]
+    return render_template(
+        "classes.html",
+        classes=classes,
+        error=error,
+        created=request.args.get("created") == "1",
+        today=today,
+    )
+
+
 @app.route("/attendance_stats")
 def attendance_stats():
     today = datetime.datetime.now(datetime.timezone.utc).date()
@@ -277,6 +406,47 @@ def attendance_stats():
         {
             "dates": [day.strftime("%d-%b") for day in days],
             "counts": [counts_by_date.get(day.isoformat(), 0) for day in days],
+        }
+    )
+
+
+@app.route("/attendance_analysis")
+def attendance_analysis():
+    with connect_db() as conn:
+        students = conn.execute(
+            """SELECT s.id, s.name, COUNT(DISTINCT a.id) AS attendance_count
+               FROM students s
+               LEFT JOIN attendance a ON a.student_id = s.id
+               GROUP BY s.id, s.name
+               ORDER BY attendance_count DESC, s.name"""
+        ).fetchall()
+        classes = conn.execute(
+            """SELECT c.id, c.name, c.class_date,
+                      COUNT(DISTINCT a.student_id) AS attendance_count
+               FROM classes c
+               LEFT JOIN attendance a ON a.class_id = c.id
+               GROUP BY c.id, c.name, c.class_date
+               ORDER BY c.class_date, c.name, c.id"""
+        ).fetchall()
+    return jsonify(
+        {
+            "students": [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "attendance_count": row["attendance_count"],
+                }
+                for row in students
+            ],
+            "classes": [
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "class_date": row["class_date"],
+                    "attendance_count": row["attendance_count"],
+                }
+                for row in classes
+            ],
         }
     )
 
@@ -354,13 +524,83 @@ def train_status():
 
 @app.route("/mark_attendance")
 def mark_attendance_page():
-    return render_template("mark_attendance.html")
+    now = datetime.datetime.now()
+    with connect_db() as conn:
+        classes = conn.execute(
+            """SELECT c.id, c.name, c.class_date, c.class_time, c.end_time, c.faculty,
+                      COUNT(DISTINCT a.student_id) AS attended_count
+               FROM classes c
+               LEFT JOIN attendance a
+                 ON a.class_id = c.id AND date(a.timestamp) = c.class_date
+               GROUP BY c.id
+               ORDER BY c.name"""
+        ).fetchall()
+    classes = [
+        {
+            **dict(class_item),
+            "attendance_open": (
+                datetime.datetime.combine(
+                    datetime.date.fromisoformat(class_item["class_date"]),
+                    datetime.time.fromisoformat(class_item["class_time"]),
+                )
+                <= now
+                < datetime.datetime.combine(
+                    datetime.date.fromisoformat(class_item["class_date"]),
+                    datetime.time.fromisoformat(class_item["end_time"]),
+                )
+            ),
+        }
+        for class_item in classes
+    ]
+    return render_template(
+        "mark_attendance.html",
+        classes=classes,
+        has_open_class=any(class_item["attendance_open"] for class_item in classes),
+    )
 
 
 @app.route("/recognize_face", methods=["POST"])
 def recognize_face():
     if "image" not in request.files:
         return jsonify({"recognized": False, "error": "No image provided."}), 400
+    class_id_value = request.form.get("class_id")
+    if class_id_value:
+        if not class_id_value.isdigit() or int(class_id_value) < 1:
+            return jsonify({"recognized": False, "error": "A valid class_id is required."}), 400
+        class_id = int(class_id_value)
+    else:
+        class_id = 0
+    class_date = None
+    class_end = None
+    if class_id:
+        with connect_db() as conn:
+            class_row = conn.execute(
+                "SELECT class_date, class_time, end_time FROM classes WHERE id = ?", (class_id,)
+            ).fetchone()
+        if class_row is None:
+            return jsonify({"recognized": False, "error": "Class not found."}), 404
+        now = datetime.datetime.now()
+        class_date = class_row["class_date"]
+        class_start = datetime.datetime.combine(
+            datetime.date.fromisoformat(class_date),
+            datetime.time.fromisoformat(class_row["class_time"]),
+        )
+        class_end = datetime.datetime.combine(
+            datetime.date.fromisoformat(class_date),
+            datetime.time.fromisoformat(class_row["end_time"]),
+        )
+        if now < class_start:
+            return jsonify(
+                {"recognized": False, "error": "Attendance for this class has not opened yet."}
+            ), 403
+        if now >= class_end:
+            return jsonify(
+                {
+                    "recognized": False,
+                    "error": "The attendance window for this class has closed.",
+                    "attendance_window_closed": True,
+                }
+            ), 403
     try:
         embedding = extract_embedding_for_image(request.files["image"].stream)
         if embedding is None:
@@ -377,16 +617,32 @@ def recognize_face():
             student = conn.execute("SELECT name FROM students WHERE id = ?", (int(student_id),)).fetchone()
             if student is None:
                 return jsonify({"recognized": False, "error": "Recognized student no longer exists."}), 404
+            if class_end is not None and datetime.datetime.now() >= class_end:
+                return jsonify(
+                    {
+                        "recognized": False,
+                        "error": "The attendance window for this class has closed.",
+                        "attendance_window_closed": True,
+                    }
+                ), 403
             guard = conn.execute(
-                "INSERT OR IGNORE INTO attendance_daily (student_id, attendance_date) VALUES (?, ?)",
-                (int(student_id), today),
+                """INSERT OR IGNORE INTO attendance_daily (student_id, attendance_date, class_id)
+                   VALUES (?, ?, ?)""",
+                (int(student_id), class_date or today, class_id),
             )
             already_marked = guard.rowcount == 0
             if not already_marked:
                 conn.execute(
-                    "INSERT INTO attendance (student_id, name, timestamp) VALUES (?, ?, ?)",
-                    (int(student_id), student["name"], timestamp.isoformat()),
+                    "INSERT INTO attendance (student_id, name, timestamp, class_id) VALUES (?, ?, ?, ?)",
+                    (int(student_id), student["name"], timestamp.isoformat(), class_id or None),
                 )
+            present_count = None
+            if class_id:
+                present_count = conn.execute(
+                    """SELECT COUNT(DISTINCT student_id) FROM attendance
+                       WHERE class_id = ? AND date(timestamp) = ?""",
+                    (class_id, class_date),
+                ).fetchone()[0]
         return jsonify(
             {
                 "recognized": True,
@@ -394,6 +650,8 @@ def recognize_face():
                 "name": student["name"],
                 "similarity": float(similarity),
                 "already_marked": already_marked,
+                "class_id": class_id or None,
+                "present_count": present_count,
             }
         )
     except FileNotFoundError as exc:
@@ -406,39 +664,78 @@ def recognize_face():
 @app.route("/attendance_record")
 def attendance_record():
     period = request.args.get("period", "all")
+    class_id_value = request.args.get("class_id", "")
+    class_id = None
+    if class_id_value:
+        if not class_id_value.isdigit() or int(class_id_value) < 1:
+            abort(400, description="class_id must be a positive integer")
+        class_id = int(class_id_value)
     today = datetime.datetime.now(datetime.timezone.utc).date()
-    query = "SELECT id, student_id, name, timestamp FROM attendance"
-    params = ()
+    query = """SELECT a.id, a.student_id, a.name, a.timestamp, c.name AS class_name
+               FROM attendance a LEFT JOIN classes c ON c.id = a.class_id"""
+    conditions = []
+    params = []
     if period == "daily":
-        query += " WHERE date(timestamp) = ?"
-        params = (today.isoformat(),)
+        conditions.append("date(a.timestamp) = ?")
+        params.append(today.isoformat())
     elif period == "weekly":
-        query += " WHERE date(timestamp) >= ?"
-        params = ((today - datetime.timedelta(days=7)).isoformat(),)
+        conditions.append("date(a.timestamp) >= ?")
+        params.append((today - datetime.timedelta(days=7)).isoformat())
     elif period == "monthly":
-        query += " WHERE date(timestamp) >= ?"
-        params = ((today - datetime.timedelta(days=30)).isoformat(),)
+        conditions.append("date(a.timestamp) >= ?")
+        params.append((today - datetime.timedelta(days=30)).isoformat())
     elif period != "all":
         abort(400, description="period must be all, daily, weekly, or monthly")
-    query += " ORDER BY timestamp DESC LIMIT 5000"
+    if class_id is not None:
+        conditions.append("a.class_id = ?")
+        params.append(class_id)
+    if conditions:
+        query += " WHERE " + " AND ".join(conditions)
+    query += " ORDER BY a.timestamp DESC LIMIT 5000"
     with connect_db() as conn:
+        classes = conn.execute("SELECT id, name FROM classes ORDER BY name").fetchall()
+        if class_id is not None and not any(class_item["id"] == class_id for class_item in classes):
+            abort(404, description="Class not found.")
         rows = conn.execute(query, params).fetchall()
-    return render_template("attendance_record.html", records=rows, period=period)
+    return render_template(
+        "attendance_record.html",
+        records=rows,
+        period=period,
+        classes=classes,
+        selected_class_id=class_id,
+    )
 
 
 @app.route("/download_csv")
 def download_csv():
+    class_id_value = request.args.get("class_id", "")
+    class_id = None
+    if class_id_value:
+        if not class_id_value.isdigit() or int(class_id_value) < 1:
+            abort(400, description="class_id must be a positive integer")
+        class_id = int(class_id_value)
     with connect_db() as conn:
+        class_name = None
+        if class_id is not None:
+            class_row = conn.execute("SELECT name FROM classes WHERE id = ?", (class_id,)).fetchone()
+            if class_row is None:
+                abort(404, description="Class not found.")
+            class_name = class_row["name"]
         rows = conn.execute(
-            "SELECT id, student_id, name, timestamp FROM attendance ORDER BY timestamp DESC"
+            """SELECT a.id, a.student_id, a.name, a.timestamp, COALESCE(c.name, '')
+               FROM attendance a LEFT JOIN classes c ON c.id = a.class_id
+               WHERE (? IS NULL OR a.class_id = ?)
+               ORDER BY a.timestamp DESC""",
+            (class_id, class_id),
         ).fetchall()
     output = io.StringIO(newline="")
     writer = csv.writer(output)
-    writer.writerow(("id", "student_id", "name", "timestamp"))
+    writer.writerow(("id", "student_id", "name", "timestamp", "class"))
     writer.writerows(tuple(row) for row in rows)
     memory = io.BytesIO(output.getvalue().encode("utf-8-sig"))
     memory.seek(0)
-    return send_file(memory, as_attachment=True, download_name="attendance.csv", mimetype="text/csv")
+    filename = f"attendance_class_{class_id}.csv" if class_name else "attendance.csv"
+    return send_file(memory, as_attachment=True, download_name=filename, mimetype="text/csv")
 
 
 @app.route("/students")

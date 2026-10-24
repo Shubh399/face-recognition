@@ -6,11 +6,22 @@ const markStatus = document.getElementById("markStatus");
 const recognizedList = document.getElementById("recognizedList");
 const detectMarkCameraBtn = document.getElementById("detectMarkCameraBtn");
 const markCameraSelect = document.getElementById("markCameraSelect");
+const classSelect = document.getElementById("classSelect");
+const classAttendanceCount = document.getElementById("classAttendanceCount");
 
 let markStream = null;
 let scanning = false;
 let recognizedIds = new Set();
 const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+
+classSelect.addEventListener("change", () => {
+  const option = classSelect.selectedOptions[0];
+  recognizedIds = new Set();
+  recognizedList.replaceChildren();
+  classAttendanceCount.innerText = option && option.value
+    ? `Present for this class: ${option.dataset.attendedCount || 0}`
+    : "Present for this class: choose a class";
+});
 
 detectMarkCameraBtn.addEventListener("click", async () => {
   detectMarkCameraBtn.disabled = true;
@@ -41,8 +52,13 @@ markCameraSelect.addEventListener("change", async () => {
 });
 
 startMarkBtn.addEventListener("click", async () => {
+  if (!classSelect.value) {
+    markStatus.innerText = "Choose a class before starting attendance.";
+    return;
+  }
   startMarkBtn.disabled = true;
   stopMarkBtn.disabled = false;
+  classSelect.disabled = true;
   try {
     if (!markCameraSelect.value) await CameraPicker.detect(markCameraSelect);
     markStream = await CameraPicker.open(markCameraSelect);
@@ -55,6 +71,7 @@ startMarkBtn.addEventListener("click", async () => {
     alert("Camera error: " + err.message);
     startMarkBtn.disabled = false;
     stopMarkBtn.disabled = true;
+    classSelect.disabled = false;
   }
 });
 
@@ -63,6 +80,7 @@ stopMarkBtn.addEventListener("click", () => {
   if (markStream) markStream.getTracks().forEach(t => t.stop());
   startMarkBtn.disabled = false;
   stopMarkBtn.disabled = true;
+  classSelect.disabled = false;
   markStatus.innerText = "Stopped";
 });
 
@@ -78,6 +96,7 @@ async function captureAndRecognize() {
     if (!blob) throw new Error("Could not capture a camera frame.");
     const fd = new FormData();
     fd.append("image", blob, "snap.jpg");
+    fd.append("class_id", classSelect.value);
     const res = await fetch("/recognize_face", {
       method: "POST",
       headers: { "X-CSRFToken": csrfToken },
@@ -85,11 +104,17 @@ async function captureAndRecognize() {
     });
     const j = await res.json();
     if (j.recognized) {
+      if (j.present_count !== null) {
+        const option = classSelect.selectedOptions[0];
+        option.dataset.attendedCount = j.present_count;
+        classAttendanceCount.innerText = `Present for this class: ${j.present_count}`;
+      }
       markStatus.innerText = j.already_marked
         ? `${j.name} is already marked present today`
         : `Attendance marked: ${j.name} (similarity ${j.similarity.toFixed(2)})`;
-      if (!recognizedIds.has(j.student_id)) {
-        recognizedIds.add(j.student_id);
+      const attendanceKey = `${j.class_id}:${j.student_id}`;
+      if (!recognizedIds.has(attendanceKey)) {
+        recognizedIds.add(attendanceKey);
         const li = document.createElement("li");
         li.className = "list-group-item";
         li.innerText = `${j.name} — ${new Date().toLocaleTimeString()}`;
@@ -98,6 +123,16 @@ async function captureAndRecognize() {
     } else {
       if (j.error) markStatus.innerText = `Not recognized: ${j.error}`;
       else markStatus.innerText = `Not recognized`;
+      if (j.attendance_window_closed) {
+        scanning = false;
+        if (markStream) markStream.getTracks().forEach(track => track.stop());
+        markStream = null;
+        markVideo.srcObject = null;
+        startMarkBtn.disabled = true;
+        stopMarkBtn.disabled = true;
+        classSelect.disabled = false;
+        markStatus.innerText = j.error;
+      }
     }
   } catch (err) {
     markStatus.innerText = err.message || "Recognition request failed.";

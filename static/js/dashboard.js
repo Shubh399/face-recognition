@@ -51,27 +51,61 @@ document.addEventListener("DOMContentLoaded", () => {
 
   pollStatus();
 
-  // Chart initial render & update every 10s
+  // Switch between attendance views in the dashboard's single chart.
   let chart = null;
+  const analysisSelect = document.getElementById("attendanceAnalysisSelect");
+  const chartTitle = document.getElementById("attendanceChartTitle");
+  const chartLabels = {
+    daily: "Attendance (Last 30 days)",
+    students: "Student-wise Attendance",
+    classes: "Class-wise Attendance"
+  };
+
   async function updateChart() {
-    const res = await fetch("/attendance_stats");
+    const view = analysisSelect.value;
+    const endpoint = view === "daily" ? "/attendance_stats" : "/attendance_analysis";
+    const res = await fetch(endpoint);
+    if (!res.ok) throw new Error("Could not load attendance analysis.");
     const data = await res.json();
-    const ctx = document.getElementById("attendanceChart").getContext("2d");
+    let labels;
+    let values;
+    let datasetLabel;
+    let horizontal = false;
+    if (view === "daily") {
+      labels = data.dates;
+      values = data.counts;
+      datasetLabel = "Attendance";
+    } else if (view === "students") {
+      labels = data.students.map(student => student.name);
+      values = data.students.map(student => student.attendance_count);
+      datasetLabel = "Recorded attendances";
+      horizontal = true;
+    } else {
+      labels = data.classes.map(item => `${item.name} (${item.class_date})`);
+      values = data.classes.map(item => item.attendance_count);
+      datasetLabel = "Students present";
+    }
+    chartTitle.innerText = chartLabels[view];
     if (!chart) {
+      const ctx = document.getElementById("attendanceChart").getContext("2d");
       chart = new Chart(ctx, {
         type: "bar",
         data: {
-          labels: data.dates,
-          datasets: [{ label: "Attendance", data: data.counts, backgroundColor: "rgba(59,130,246,0.7)" }]
+          labels,
+          datasets: [{ label: datasetLabel, data: values, backgroundColor: "rgba(59,130,246,0.7)" }]
         },
-        options: { responsive: true, maintainAspectRatio: false }
+        options: { responsive: true, maintainAspectRatio: false, indexAxis: horizontal ? "y" : "x" }
       });
     } else {
-      chart.data.labels = data.dates;
-      chart.data.datasets[0].data = data.counts;
+      chart.data.labels = labels;
+      chart.data.datasets[0].label = datasetLabel;
+      chart.data.datasets[0].data = values;
+      chart.options.indexAxis = horizontal ? "y" : "x";
       chart.update();
     }
   }
-  updateChart();
-  setInterval(updateChart, 10000);
+
+  analysisSelect.addEventListener("change", () => updateChart().catch(error => console.error(error)));
+  updateChart().catch(error => console.error(error));
+  setInterval(() => updateChart().catch(error => console.error(error)), 10000);
 });

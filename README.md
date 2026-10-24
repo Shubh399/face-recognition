@@ -14,8 +14,12 @@ This is an educational/demo application. Face recognition can produce false matc
 - Captured enrollment images stored as image BLOBs in the local SQLite database.
 - YuNet face detection and SFace embeddings for face matching.
 - Background model training with visible progress and terminal success/error status.
-- Live attendance with at most one attendance record per student per UTC calendar day.
-- Dashboard chart for the last 30 days, filtered attendance records, and CSV export.
+- Live attendance with at most one attendance record per student per UTC calendar day, or per class session.
+- Admin-created classes with a name, scheduled date, start and end times, faculty, and a live attendance count for the scheduled date. Class times use the server's local time.
+- Server-enforced attendance windows: attendance opens at the class start time and closes at the end time. Past classes are read-only and cannot be used to mark attendance.
+- Class-specific attendance tracking, so students can be counted independently in each class.
+- Dashboard chart for the last 30 days, class-filtered attendance records, and class-wise or all-record CSV exports.
+- Dashboard analytics showing recorded attendance totals per student and per class session.
 - Deleting a student removes their profile, attendance, photos, and trained embedding.
 
 ## How the Project Works
@@ -23,7 +27,7 @@ This is an educational/demo application. Face recognition can produce false matc
 1. **Enroll:** An administrator saves a student's details. The browser requests webcam permission and captures up to 50 JPEG frames from the selected camera. The frames are validated and saved to the `student_faces` SQLite table.
 2. **Train:** The training process reads the stored photos, detects and aligns faces with YuNet, computes SFace embeddings, averages the embeddings per student, and writes the searchable model to `face_embeddings.npz`.
 3. **Recognize:** The attendance page captures webcam frames and sends them to Flask. The server creates an SFace embedding and compares it with enrolled student embeddings using cosine similarity.
-4. **Record attendance:** A match above the configured similarity threshold is recorded once per student per UTC day. Further recognitions that day show that attendance is already marked instead of creating duplicate records.
+4. **Record attendance:** A match above the configured similarity threshold is recorded only while the selected class is in its scheduled window and only once per student per class session.
 5. **Review:** The administrator views dashboard statistics, filters attendance records, or downloads them as CSV.
 
 ### Workflow
@@ -34,8 +38,9 @@ Admin login
     -> Detect/select laptop webcam
     -> Capture and store student photos in SQLite
     -> Train face embeddings
-    -> Detect/select webcam on attendance page
-    -> Recognize face and mark attendance once per UTC day
+    -> Create a class with its scheduled start/end times and faculty
+    -> Select the class and detect/select webcam on the attendance page
+    -> Recognize faces and mark attendance during the class window
     -> View or export attendance records
 ```
 

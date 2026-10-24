@@ -10,11 +10,12 @@
 <body>
 <div class="container my-4">
   <div class="card p-4 shadow-sm">
-    <div class="d-flex justify-content-between align-items-center">
+    <div class="page-header d-flex justify-content-between align-items-center">
       <h4>Mark Attendance (Live)</h4>
-      <div>
+      <div class="page-actions">
+        <a class="btn btn-outline-secondary" href="{{ url_for('index') }}">Back</a>
         <button id="detectMarkCameraBtn" class="btn btn-outline-primary">Detect cameras</button>
-        <button id="startMarkBtn" class="btn btn-primary">Start</button>
+        <button id="startMarkBtn" class="btn btn-primary" {% if not has_open_class %}disabled{% endif %}>Start</button>
         <button id="stopMarkBtn" class="btn btn-danger" disabled>Stop</button>
         <form method="post" action="{{ url_for('logout') }}" class="d-inline">
           <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -25,11 +26,30 @@
 
     <div class="row mt-3">
       <div class="col-md-7 text-center">
+        <label class="form-label text-start d-block" for="classSelect">Class session</label>
+        <select id="classSelect" class="form-select mb-3" required {% if not classes %}disabled{% endif %}>
+          {% if classes %}
+            <option value="">Choose a class before starting</option>
+            {% for class_item in classes %}
+              <option value="{{ class_item.id }}" data-attended-count="{{ class_item.attended_count }}" {% if not class_item.attendance_open %}disabled{% endif %}>{{ class_item.name }} — {{ class_item.class_date }} {{ class_item.class_time }}-{{ class_item.end_time }} local time ({{ class_item.faculty }})</option>
+            {% endfor %}
+          {% else %}
+            <option value="">Create a class before marking attendance</option>
+          {% endif %}
+        </select>
+        {% if not classes %}
+          <p class="small text-muted">No classes are available. <a href="{{ url_for('classes_page') }}">Create a class</a> first.</p>
+        {% elif not has_open_class %}
+          <p class="small text-muted">Attendance can only be marked during a class's scheduled time. No class is currently open.</p>
+        {% endif %}
+        <p id="classAttendanceCount" class="small text-muted" aria-live="polite">
+          {% if classes %}Present for this class: choose a class{% endif %}
+        </p>
         <label class="form-label" for="markCameraSelect">Webcam (choose the laptop's built-in webcam)</label>
         <select id="markCameraSelect" class="form-select mb-3" disabled>
           <option value="">Detect cameras first</option>
         </select>
-        <video id="markVideo" width="560" height="420" autoplay muted style="border-radius:10px;border:2px solid #e2e8f0;"></video>
+        <video id="markVideo" autoplay muted playsinline></video>
         <div id="markStatus" class="mt-2 small text-muted">Waiting...</div>
       </div>
       <div class="col-md-5">

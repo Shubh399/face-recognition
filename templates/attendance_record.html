@@ -8,10 +8,14 @@
 </head>
 <body>
 <div class="container my-4">
-  <div class="d-flex justify-content-between align-items-center mb-3">
+  <div class="page-header d-flex justify-content-between align-items-center mb-3">
     <h4>Attendance Records</h4>
-    <div>
-      <a class="btn btn-outline-primary" href="/download_csv">Download CSV</a>
+    <div class="page-actions">
+      {% if selected_class_id %}
+        <a class="btn btn-outline-primary" href="{{ url_for('download_csv', class_id=selected_class_id) }}">Download Class CSV</a>
+      {% else %}
+        <a class="btn btn-outline-primary" href="{{ url_for('download_csv') }}">Download All CSV</a>
+      {% endif %}
       <a class="btn btn-outline-secondary" href="/">Back</a>
       <form method="post" action="{{ url_for('logout') }}" class="d-inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
@@ -20,21 +24,37 @@
     </div>
   </div>
 
+  <form method="get" action="{{ url_for('attendance_record') }}" class="row g-2 align-items-end mb-3">
+    <input type="hidden" name="period" value="{{ period }}">
+    <div class="col-md-5">
+      <label class="form-label" for="classFilter">Filter by class</label>
+      <select class="form-select" id="classFilter" name="class_id">
+        <option value="">All classes</option>
+        {% for class_item in classes %}
+          <option value="{{ class_item.id }}" {% if selected_class_id == class_item.id %}selected{% endif %}>{{ class_item.name }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="col-auto">
+      <button class="btn btn-primary w-100" type="submit">Show Records</button>
+    </div>
+  </form>
+
   <div class="mb-3">
-    <a href="/attendance_record?period=all" class="btn btn-sm btn-light">All</a>
-    <a href="/attendance_record?period=daily" class="btn btn-sm btn-light">Daily</a>
-    <a href="/attendance_record?period=weekly" class="btn btn-sm btn-light">Weekly</a>
-    <a href="/attendance_record?period=monthly" class="btn btn-sm btn-light">Monthly</a>
+    <a href="{{ url_for('attendance_record', period='all', class_id=selected_class_id) }}" class="btn btn-sm btn-light">All</a>
+    <a href="{{ url_for('attendance_record', period='daily', class_id=selected_class_id) }}" class="btn btn-sm btn-light">Daily</a>
+    <a href="{{ url_for('attendance_record', period='weekly', class_id=selected_class_id) }}" class="btn btn-sm btn-light">Weekly</a>
+    <a href="{{ url_for('attendance_record', period='monthly', class_id=selected_class_id) }}" class="btn btn-sm btn-light">Monthly</a>
   </div>
 
   <div class="table-responsive">
     <table class="table table-striped">
       <thead class="table-dark">
-        <tr><th>ID</th><th>Student ID</th><th>Name</th><th>Timestamp (UTC)</th></tr>
+        <tr><th>ID</th><th>Student ID</th><th>Name</th><th>Class</th><th>Timestamp (UTC)</th></tr>
       </thead>
       <tbody>
       {% for r in records %}
-        <tr><td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r[3] }}</td></tr>
+        <tr><td>{{ r[0] }}</td><td>{{ r[1] }}</td><td>{{ r[2] }}</td><td>{{ r["class_name"] or "—" }}</td><td>{{ r[3] }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
