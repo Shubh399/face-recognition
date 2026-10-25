@@ -311,7 +311,15 @@ def logout():
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    with connect_db() as conn:
+        classes = conn.execute("SELECT id, name, class_date FROM classes ORDER BY class_date DESC, name").fetchall()
+        cohorts = conn.execute(
+            "SELECT DISTINCT class FROM students WHERE class IS NOT NULL AND trim(class) != '' ORDER BY class"
+        ).fetchall()
+        sections = conn.execute(
+            "SELECT DISTINCT section FROM students WHERE section IS NOT NULL AND trim(section) != '' ORDER BY section"
+        ).fetchall()
+    return render_template("index.html", classes=classes, cohorts=cohorts, sections=sections)
 
 
 @app.route("/classes", methods=["GET", "POST"])
@@ -392,49 +400,231 @@ def classes_page():
 @app.route("/attendance_stats")
 def attendance_stats():
     today = datetime.datetime.now(datetime.timezone.utc).date()
-    days = [today - datetime.timedelta(days=i) for i in range(29, -1, -1)]
+    period = request.args.get("period", "30")
+    if period not in {"7", "30", "90", "all"}:
+        abort(400, description="period must be 7, 30, 90, or all")
+    class_id_value = request.args.get("class_id", "")
+    class_id = None
+    if class_id_value:
+        if not class_id_value.isdigit() or int(class_id_value) < 1:
+            abort(400, description="class_id must be a positive integer")
+        class_id = int(class_id_value)
+    cohort = request.args.get("cohort", "").strip()
+    section = request.args.get("section", "").strip()
+    if period == "all":
+        first_date_conditions = []
+        first_date_params = []
+        if class_id is not None:
+            first_date_conditions.append("class_id = ?")
+            first_date_params.append(class_id)
+        first_date_student_conditions = []
+        if cohort:
+            first_date_student_conditions.append("s.class = ?")
+            first_date_params.append(cohort)
+        if section:
+            first_date_student_conditions.append("s.section = ?")
+            first_date_params.append(section)
+        if first_date_student_conditions:
+            first_date_conditions.append(
+                "EXISTS (SELECT 1 FROM students s WHERE s.id = attendance.student_id AND "
+                + " AND ".join(first_date_student_conditions)
+                + ")"
+            )
+        first_date_where = " WHERE " + " AND ".join(first_date_conditions) if first_date_conditions else ""
+        with connect_db() as conn:
+            first_date = conn.execute(
+                f"SELECT MIN(date(timestamp)) FROM attendance{first_date_where}", first_date_params
+            ).fetchone()[0]
+        start_date = datetime.date.fromisoformat(first_date) if first_date else today
+    else:
+        start_date = today - datetime.timedelta(days=int(period) - 1)
+    days = [start_date + datetime.timedelta(days=i) for i in range((today - start_date).days + 1)]
+    conditions = ["date(timestamp) >= ?", "date(timestamp) <= ?"]
+    params = [start_date.isoformat(), today.isoformat()]
+    if class_id is not None:
+        conditions.append("class_id = ?")
+        params.append(class_id)
+    student_conditions = []
+    student_params = []
+    if cohort:
+        student_conditions.append("s.class = ?")
+        student_params.append(cohort)
+    if section:
+        student_conditions.append("s.section = ?")
+        student_params.append(section)
+    if student_conditions:
+        conditions.append(
+            "EXISTS (SELECT 1 FROM students s WHERE s.id = attendance.student_id AND "
+            + " AND ".join(student_conditions)
+            + ")"
+        )
+        params.extend(student_params)
     with connect_db() as conn:
         rows = conn.execute(
-            """SELECT date(timestamp) AS attendance_date, COUNT(*) AS count
-               FROM attendance
-               WHERE date(timestamp) >= ?
-               GROUP BY date(timestamp)""",
-            ((today - datetime.timedelta(days=29)).isoformat(),),
+            f"""SELECT date(timestamp) AS attendance_date, COUNT(*) AS count
+                FROM attendance
+                WHERE {" AND ".join(conditions)}
+                GROUP BY date(timestamp)""",
+            params,
         ).fetchall()
     counts_by_date = {row["attendance_date"]: row["count"] for row in rows}
     return jsonify(
         {
             "dates": [day.strftime("%d-%b") for day in days],
             "counts": [counts_by_date.get(day.isoformat(), 0) for day in days],
+            "period": period,
         }
     )
 
 
 @app.route("/attendance_analysis")
 def attendance_analysis():
+    period = request.args.get("period", "30")
+    if period not in {"7", "30", "90", "all"}:
+        abort(400, description="period must be 7, 30, 90, or all")
+    class_id_value = request.args.get("class_id", "")
+    class_id = None
+    if class_id_value:
+        if not class_id_value.isdigit() or int(class_id_value) < 1:
+            abort(400, description="class_id must be a positive integer")
+        class_id = int(class_id_value)
+    cohort = request.args.get("cohort", "").strip()
+    section = request.args.get("section", "").strip()
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    start_date = today - datetime.timedelta(days=int(period) - 1) if period != "all" else None
+    attendance_conditions = []
+    attendance_params = []
+    if start_date:
+        attendance_conditions.append("date(a.timestamp) >= ?")
+        attendance_params.append(start_date.isoformat())
+    attendance_conditions.append("date(a.timestamp) <= ?")
+    attendance_params.append(today.isoformat())
+    if class_id is not None:
+        attendance_conditions.append("a.class_id = ?")
+        attendance_params.append(class_id)
+    attendance_filter = " AND ".join(attendance_conditions)
+    student_conditions = []
+    student_params = []
+    if cohort:
+        student_conditions.append("s.class = ?")
+        student_params.append(cohort)
+    if section:
+        student_conditions.append("s.section = ?")
+        student_params.append(section)
+    student_filter = " WHERE " + " AND ".join(student_conditions) if student_conditions else ""
     with connect_db() as conn:
         students = conn.execute(
-            """SELECT s.id, s.name, COUNT(DISTINCT a.id) AS attendance_count
+            f"""SELECT s.id, s.name, s.roll, s.class AS cohort, s.section,
+                      COUNT(DISTINCT a.id) AS attendance_count,
+                      COUNT(DISTINCT CASE
+                          WHEN a.id IS NOT NULL AND a.class_id IS NULL THEN 'date:' || date(a.timestamp)
+                          WHEN a.id IS NOT NULL THEN 'class:' || a.class_id
+                      END) AS sessions_attended,
+                      COUNT(DISTINCT date(a.timestamp)) AS active_days,
+                      (SELECT MAX(date(history.timestamp)) FROM attendance history
+                       WHERE history.student_id = s.id) AS last_attended
                FROM students s
-               LEFT JOIN attendance a ON a.student_id = s.id
-               GROUP BY s.id, s.name
-               ORDER BY attendance_count DESC, s.name"""
+               LEFT JOIN attendance a ON a.student_id = s.id AND {attendance_filter}
+               {student_filter}
+               GROUP BY s.id, s.name, s.roll, s.class, s.section
+               ORDER BY attendance_count DESC, s.name""",
+            attendance_params + student_params,
         ).fetchall()
+        trend_conditions = [
+            "date(a.timestamp) >= date(limits.today, '-13 days')",
+            "date(a.timestamp) <= limits.today",
+        ]
+        trend_params = []
+        if class_id is not None:
+            trend_conditions.append("a.class_id = ?")
+            trend_params.append(class_id)
+        if cohort:
+            trend_conditions.append("s.class = ?")
+            trend_params.append(cohort)
+        if section:
+            trend_conditions.append("s.section = ?")
+            trend_params.append(section)
+        trends = conn.execute(
+            f"""WITH limits AS (SELECT date(?) AS today)
+                SELECT a.student_id,
+                       COUNT(DISTINCT CASE
+                           WHEN date(a.timestamp) >= date(limits.today, '-6 days')
+                           THEN date(a.timestamp) END) AS last_7_days,
+                       COUNT(DISTINCT CASE
+                           WHEN date(a.timestamp) < date(limits.today, '-6 days')
+                           THEN date(a.timestamp) END) AS previous_7_days
+                FROM attendance a
+                JOIN students s ON s.id = a.student_id
+                CROSS JOIN limits
+                WHERE {" AND ".join(trend_conditions)}
+                GROUP BY a.student_id""",
+            [today.isoformat()] + trend_params,
+        ).fetchall()
+        trends_by_student = {row["student_id"]: dict(row) for row in trends}
+        class_student_conditions = []
+        class_params = attendance_params.copy()
+        if cohort:
+            class_student_conditions.append("s.class = ?")
+            class_params.append(cohort)
+        if section:
+            class_student_conditions.append("s.section = ?")
+            class_params.append(section)
+        student_scope = ""
+        if class_student_conditions:
+            student_scope = (
+                " AND EXISTS (SELECT 1 FROM students s WHERE s.id = a.student_id AND "
+                + " AND ".join(class_student_conditions)
+                + ")"
+            )
+        class_conditions = ["c.class_date <= ?"]
+        class_where_params = [today.isoformat()]
+        if start_date:
+            class_conditions.append("c.class_date >= ?")
+            class_where_params.append(start_date.isoformat())
+        if class_id is not None:
+            class_conditions.append("c.id = ?")
+            class_where_params.append(class_id)
         classes = conn.execute(
-            """SELECT c.id, c.name, c.class_date,
+            f"""SELECT c.id, c.name, c.class_date,
                       COUNT(DISTINCT a.student_id) AS attendance_count
                FROM classes c
-               LEFT JOIN attendance a ON a.class_id = c.id
+               LEFT JOIN attendance a ON a.class_id = c.id AND {attendance_filter}{student_scope}
+               WHERE {" AND ".join(class_conditions)}
                GROUP BY c.id, c.name, c.class_date
-               ORDER BY c.class_date, c.name, c.id"""
+               ORDER BY c.class_date, c.name, c.id""",
+            class_params + class_where_params,
         ).fetchall()
+        summary = conn.execute(
+            f"""SELECT COUNT(DISTINCT a.id) AS attendance_count,
+                       COUNT(DISTINCT CASE
+                           WHEN a.class_id IS NULL THEN 'date:' || date(a.timestamp)
+                           ELSE 'class:' || a.class_id
+                       END) AS session_count
+                FROM attendance a
+                LEFT JOIN students s ON s.id = a.student_id
+                WHERE {attendance_filter}
+                {"AND s.class = ?" if cohort else ""}
+                {"AND s.section = ?" if section else ""}""",
+            attendance_params + student_params,
+        ).fetchone()
+        student_count = conn.execute(
+            f"SELECT COUNT(*) FROM students s{student_filter}", student_params
+        ).fetchone()[0]
     return jsonify(
         {
             "students": [
                 {
                     "id": row["id"],
                     "name": row["name"],
+                    "roll": row["roll"],
+                    "cohort": row["cohort"],
+                    "section": row["section"],
                     "attendance_count": row["attendance_count"],
+                    "sessions_attended": row["sessions_attended"],
+                    "active_days": row["active_days"],
+                    "last_attended": row["last_attended"],
+                    "last_7_days": trends_by_student.get(row["id"], {}).get("last_7_days", 0),
+                    "previous_7_days": trends_by_student.get(row["id"], {}).get("previous_7_days", 0),
                 }
                 for row in students
             ],
@@ -447,6 +637,12 @@ def attendance_analysis():
                 }
                 for row in classes
             ],
+            "summary": {
+                "student_count": student_count,
+                "attendance_count": summary["attendance_count"],
+                "session_count": summary["session_count"],
+                "period": period,
+            },
         }
     )
 

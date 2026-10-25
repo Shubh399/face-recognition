@@ -19,7 +19,7 @@ This is an educational/demo application. Face recognition can produce false matc
 - Server-enforced attendance windows: attendance opens at the class start time and closes at the end time. Past classes are read-only and cannot be used to mark attendance.
 - Class-specific attendance tracking, so students can be counted independently in each class.
 - Dashboard chart for the last 30 days, class-filtered attendance records, and class-wise or all-record CSV exports.
-- Dashboard analytics showing recorded attendance totals per student and per class session.
+- Dashboard analytics with 7/30/90-day or all-time filters, scheduled-class/cohort/section filters, class and daily charts, student attendance trends, session totals, and latest-attendance insights.
 - Deleting a student removes their profile, attendance, photos, and trained embedding.
 
 ## How the Project Works
@@ -101,7 +101,7 @@ Keep `.env` private; it is ignored by Git. Do not use a demo password for any ne
 Whenever you want to run the app, from this project directory execute:
 
 ```powershell
-.\.venv\Scripts\python.exe app.py
+.\.venv\Scripts\python.exe -m flask --app app run --host 0.0.0.0 --port 5000      
 ```
 
 Open <http://127.0.0.1:5000> in the browser and sign in with the credentials in `.env`. Stop the server with **Ctrl+C**. On the dashboard, add students and train the model before using **Mark Attendance**. At enrollment and attendance, select **Detect cameras**, grant camera permission, then choose the laptop's integrated/built-in webcam rather than a device labeled Phone, Mobile, or Link to Windows.

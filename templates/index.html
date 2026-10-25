@@ -11,32 +11,47 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
   <style>
-    html, body {
-      height: 100%;
-      margin: 0;
+    * {
       scrollbar-width: none;
       -ms-overflow-style: none;
     }
-    html::-webkit-scrollbar, body::-webkit-scrollbar, .right-panel::-webkit-scrollbar {
+
+    *::-webkit-scrollbar {
+      width: 0;
+      height: 0;
       display: none;
+    }
+
+    html, body {
+      min-height: 100%;
+      height: 100%;
+      margin: 0;
+      overflow-x: hidden;
+      overflow-y: auto;
     }
 
     /* Right panel column */
     .right-panel {
       width: 100%;
       max-width: 1280px;
+      min-height: 100vh;
+      min-height: 100dvh;
+      box-sizing: border-box;
       margin: 0 auto;
       padding: clamp(0.75rem, 3vw, 2rem);
       background: transparent;
-      overflow-y: visible;
+      overflow: visible;
+      display: flex;
+      flex-direction: column;
     }
 
     .nav-surface {
       background: rgba(255, 255, 255, 0.82);
-      margin-bottom: 1.5rem;
+      margin-bottom: 0.75rem;
       border: 1px solid rgba(0, 0, 0, 0.06);
       border-radius: 1rem;
       box-shadow: 0 4px 18px rgba(0, 0, 0, 0.045);
+      flex-shrink: 0;
     }
 
     .glass-card {
@@ -59,7 +74,45 @@
     }
 
     .chart-container {
-      height: clamp(260px, 42vw, 320px) !important;
+      height: clamp(150px, 24vh, 280px) !important;
+      height: clamp(150px, 24dvh, 280px) !important;
+    }
+
+    .right-panel .container {
+      flex: 0 0 auto;
+    }
+
+    .right-panel .row {
+      height: auto;
+      --bs-gutter-y: 0.75rem;
+    }
+
+    .right-panel .card {
+      min-height: 0;
+    }
+
+    .analysis-card {
+      margin-top: 1rem;
+    }
+
+    .metric-card {
+      height: 100%;
+      border-left: 4px solid #0071e3;
+    }
+
+    .metric-value {
+      font-size: 1.65rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+    }
+
+    .student-analysis-table {
+      max-height: 360px;
+      overflow: auto;
+    }
+
+    .student-analysis-table table {
+      white-space: nowrap;
     }
 
     @media (max-width: 992px) {
@@ -90,6 +143,7 @@
         width: 100%;
         max-width: none !important;
       }
+      .right-panel .row { height: auto; }
     }
   </style>
 </head>
@@ -144,18 +198,99 @@
             </div>
           </div>
 
-          <div class="card p-3 shadow-sm mt-4 glass-card">
+          <div class="card p-3 shadow-sm analysis-card glass-card">
             <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
               <h5 id="attendanceChartTitle" class="mb-0">Attendance (Last 30 days)</h5>
               <label class="visually-hidden" for="attendanceAnalysisSelect">Attendance analysis</label>
               <select id="attendanceAnalysisSelect" class="form-select" style="max-width: 260px;">
                 <option value="daily">Daily attendance (last 30 days)</option>
-                <option value="students">Student-wise attendance</option>
+                <option value="students">Student attendance totals</option>
+                <option value="trends">Student 7-day trends</option>
                 <option value="classes">Class-wise attendance</option>
               </select>
             </div>
+            <div class="row g-2 align-items-end mb-3">
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="analysisPeriod">Date range</label>
+                <select id="analysisPeriod" class="form-select">
+                  <option value="7">Last 7 days</option>
+                  <option value="30" selected>Last 30 days</option>
+                  <option value="90">Last 90 days</option>
+                  <option value="all">All time</option>
+                </select>
+              </div>
+              <div class="col-sm-6 col-lg-3">
+                <label class="form-label" for="analysisClass">Scheduled class</label>
+                <select id="analysisClass" class="form-select">
+                  <option value="">All classes</option>
+                  {% for class_item in classes %}
+                    <option value="{{ class_item.id }}">{{ class_item.name }} · {{ class_item.class_date }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="analysisCohort">Student cohort</label>
+                <select id="analysisCohort" class="form-select">
+                  <option value="">All cohorts</option>
+                  {% for cohort in cohorts %}
+                    <option value="{{ cohort.class }}">{{ cohort.class }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-sm-6 col-lg-2">
+                <label class="form-label" for="analysisSection">Section</label>
+                <select id="analysisSection" class="form-select">
+                  <option value="">All sections</option>
+                  {% for section in sections %}
+                    <option value="{{ section.section }}">{{ section.section }}</option>
+                  {% endfor %}
+                </select>
+              </div>
+              <div class="col-sm-12 col-lg-2">
+                <label class="form-label" for="studentSearch">Find student</label>
+                <input id="studentSearch" class="form-control" type="search" placeholder="Name or roll">
+              </div>
+            </div>
+            <p class="small text-muted mb-3">
+              Scheduled-class filters narrow recorded activity. Student profiles are not linked to specific class sessions.
+            </p>
+            <div class="row g-2 mb-3" aria-live="polite">
+              <div class="col-6 col-lg-4">
+                <div class="card metric-card p-3">
+                  <div class="small text-muted">Students in cohort / section</div>
+                  <div id="studentCountMetric" class="metric-value">—</div>
+                </div>
+              </div>
+              <div class="col-6 col-lg-4">
+                <div class="card metric-card p-3">
+                  <div class="small text-muted">Attendance records</div>
+                  <div id="attendanceCountMetric" class="metric-value">—</div>
+                </div>
+              </div>
+              <div class="col-12 col-lg-4">
+                <div class="card metric-card p-3">
+                  <div class="small text-muted">Sessions with attendance</div>
+                  <div id="sessionCountMetric" class="metric-value">—</div>
+                </div>
+              </div>
+            </div>
             <div class="chart-container" style="position:relative; height:320px; width:100%;">
                <canvas id="attendanceChart"></canvas>
+            </div>
+            <h6 class="mt-4 mb-2">Student attendance insights</h6>
+            <div class="student-analysis-table table-responsive">
+              <table class="table table-sm table-striped">
+                <thead class="table-dark">
+                  <tr>
+                    <th>Student</th><th>Cohort / section</th><th>Records</th>
+                    <th>Sessions</th><th>Active days</th><th>Days active (last 7)</th>
+                    <th>Days active (prior 7)</th><th>Most recent attendance</th>
+                  </tr>
+                </thead>
+                <tbody id="studentAnalysisRows">
+                  <tr><td colspan="8" class="text-muted">Loading student insights…</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>

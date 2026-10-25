@@ -52,8 +52,19 @@ def active_class_times():
 def test_admin_login_protects_pages_and_apis(client):
     assert client.get("/").status_code == 302
     assert client.get("/students").status_code == 401
+    login_page = client.get("/login")
+    assert login_page.status_code == 200
+    assert b"Attendly" in login_page.data
+    assert b'id="username"' in login_page.data
+    assert b'id="password"' in login_page.data
     assert login(client).status_code == 302
-    assert client.get("/").status_code == 200
+    dashboard = client.get("/")
+    assert dashboard.status_code == 200
+    assert b'id="analysisPeriod"' in dashboard.data
+    assert b'id="analysisClass"' in dashboard.data
+    assert b'id="analysisCohort"' in dashboard.data
+    assert b'id="analysisSection"' in dashboard.data
+    assert b'id="studentAnalysisRows"' in dashboard.data
     assert client.get("/students").status_code == 200
 
 
@@ -400,26 +411,87 @@ def test_attendance_analysis_returns_student_and_class_totals(client):
     response = client.get("/attendance_analysis")
 
     assert response.status_code == 200
-    assert response.json == {
-        "students": [
-            {"id": ada_id, "name": "Ada", "attendance_count": 2},
-            {"id": grace_id, "name": "Grace", "attendance_count": 1},
-        ],
-        "classes": [
-            {
-                "id": class_ids[0],
-                "name": "Computer Science",
-                "class_date": class_date,
-                "attendance_count": 2,
-            },
-            {
-                "id": class_ids[1],
-                "name": "Mathematics",
-                "class_date": class_date,
-                "attendance_count": 1,
-            },
-        ],
+    assert response.json["students"][0]["id"] == ada_id
+    assert response.json["students"][0]["attendance_count"] == 2
+    assert response.json["students"][0]["sessions_attended"] == 2
+    assert response.json["students"][0]["last_attended"] == timestamp[:10]
+    assert response.json["students"][1]["id"] == grace_id
+    assert response.json["students"][1]["attendance_count"] == 1
+    assert [item["id"] for item in response.json["classes"]] == class_ids
+    assert [item["attendance_count"] for item in response.json["classes"]] == [2, 1]
+    assert response.json["summary"] == {
+        "student_count": 2,
+        "attendance_count": 3,
+        "session_count": 2,
+        "period": "30",
     }
+
+
+def test_dashboard_analytics_filters_period_class_cohort_and_section(client):
+    login(client)
+    today = attendance_app.datetime.datetime.now(attendance_app.datetime.timezone.utc).date()
+    client.post(
+        "/classes",
+        data={
+            "name": "Computer Science",
+            "class_date": today.isoformat(),
+            "class_time": "09:30",
+            "end_time": "10:30",
+            "faculty": "Ada Lovelace",
+        },
+    )
+    timestamp = attendance_app.datetime.datetime.now(attendance_app.datetime.timezone.utc).isoformat()
+    previous_week_timestamp = (
+        attendance_app.datetime.datetime.now(attendance_app.datetime.timezone.utc)
+        - attendance_app.datetime.timedelta(days=10)
+    ).isoformat()
+    old_timestamp = (today - attendance_app.datetime.timedelta(days=40)).isoformat()
+    with sqlite3.connect(attendance_app.DB_PATH) as conn:
+        class_id = conn.execute("SELECT id FROM classes").fetchone()[0]
+        ada_id = conn.execute(
+            "INSERT INTO students (name, roll, class, section) VALUES (?, ?, ?, ?)",
+            ("Ada", "1", "CS", "A"),
+        ).lastrowid
+        grace_id = conn.execute(
+            "INSERT INTO students (name, roll, class, section) VALUES (?, ?, ?, ?)",
+            ("Grace", "2", "CS", "B"),
+        ).lastrowid
+        conn.executemany(
+            "INSERT INTO attendance (student_id, name, timestamp, class_id) VALUES (?, ?, ?, ?)",
+            [
+                (ada_id, "Ada", timestamp, class_id),
+                (ada_id, "Ada", previous_week_timestamp, class_id),
+                (grace_id, "Grace", timestamp, class_id),
+                (ada_id, "Ada", old_timestamp, class_id),
+            ],
+        )
+
+    query = f"/attendance_analysis?period=30&class_id={class_id}&cohort=CS&section=A"
+    response = client.get(query)
+    assert response.status_code == 200
+    assert [student["id"] for student in response.json["students"]] == [ada_id]
+    assert response.json["students"][0]["attendance_count"] == 2
+    assert response.json["students"][0]["sessions_attended"] == 1
+    assert response.json["students"][0]["last_7_days"] == 1
+    assert response.json["students"][0]["previous_7_days"] == 1
+    assert response.json["summary"] == {
+        "student_count": 1,
+        "attendance_count": 2,
+        "session_count": 1,
+        "period": "30",
+    }
+    assert len(response.json["classes"]) == 1
+    assert response.json["classes"][0]["attendance_count"] == 1
+
+    recent_only = client.get(f"/attendance_analysis?period=7&class_id={class_id}&cohort=CS&section=A")
+    assert recent_only.status_code == 200
+    assert recent_only.json["students"][0]["attendance_count"] == 1
+    assert recent_only.json["students"][0]["previous_7_days"] == 1
+
+    stats = client.get(f"/attendance_stats?period=30&class_id={class_id}&cohort=CS&section=A")
+    assert stats.status_code == 200
+    assert sum(stats.json["counts"]) == 2
+    assert client.get("/attendance_analysis?period=invalid").status_code == 400
 
 
 def test_class_creation_requires_valid_date(client):
