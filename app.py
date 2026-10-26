@@ -48,6 +48,18 @@ if len(app.config["ADMIN_PASSWORD"]) < 6:
 
 CSRFProtect(app)
 training_lock = threading.Lock()
+IST = datetime.timezone(datetime.timedelta(hours=5, minutes=30))
+
+
+def get_current_time():
+    """Return current datetime in Indian Standard Time (IST, UTC+5:30) as a timezone-naive datetime."""
+    return datetime.datetime.now(IST).replace(tzinfo=None)
+
+
+def get_current_date():
+    """Return today's date in Indian Standard Time (IST)."""
+    return get_current_time().date()
+
 
 
 @contextmanager
@@ -182,7 +194,7 @@ def migrate_dataset_images():
                 "SELECT 1 FROM student_faces WHERE student_id = ? LIMIT 1", (int(student_folder),)
             ).fetchone()
             if student and not existing:
-                created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                created_at = get_current_time().isoformat()
                 for path in files:
                     with open(path, "rb") as image_file:
                         image = image_file.read()
@@ -348,7 +360,7 @@ def classes_page():
         if not name or not valid_date or not valid_time or not valid_end_time or not faculty:
             error = "Provide a class name, valid date and start/end times (end after start), and faculty."
         else:
-            created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+            created_at = get_current_time().isoformat()
             with connect_db() as conn:
                 conn.execute(
                     """INSERT INTO classes (name, class_date, class_time, end_time, faculty, created_at)
@@ -357,7 +369,7 @@ def classes_page():
                 )
             return redirect(url_for("classes_page", created=1))
 
-    now = datetime.datetime.now()
+    now = get_current_time()
     today = now.date().isoformat()
     with connect_db() as conn:
         classes = conn.execute(
@@ -399,7 +411,7 @@ def classes_page():
 
 @app.route("/attendance_stats")
 def attendance_stats():
-    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today = get_current_date()
     period = request.args.get("period", "30")
     if period not in {"7", "30", "90", "all"}:
         abort(400, description="period must be 7, 30, 90, or all")
@@ -490,7 +502,7 @@ def attendance_analysis():
         class_id = int(class_id_value)
     cohort = request.args.get("cohort", "").strip()
     section = request.args.get("section", "").strip()
-    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today = get_current_date()
     start_date = today - datetime.timedelta(days=int(period) - 1) if period != "all" else None
     attendance_conditions = []
     attendance_params = []
@@ -665,7 +677,7 @@ def add_student():
                 data.get("class", "").strip(),
                 data.get("sec", "").strip(),
                 data.get("reg_no", "").strip(),
-                datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                get_current_time().isoformat(),
             ),
         )
         student_id = cursor.lastrowid
@@ -687,7 +699,7 @@ def upload_face():
         exists = conn.execute("SELECT 1 FROM students WHERE id = ?", (int(student_id),)).fetchone()
         if not exists:
             return jsonify({"error": "Student not found."}), 404
-        created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        created_at = get_current_time().isoformat()
         conn.executemany(
             "INSERT INTO student_faces (student_id, image, created_at) VALUES (?, ?, ?)",
             [(int(student_id), image, created_at) for image in images],
@@ -720,7 +732,7 @@ def train_status():
 
 @app.route("/mark_attendance")
 def mark_attendance_page():
-    now = datetime.datetime.now()
+    now = get_current_time()
     with connect_db() as conn:
         classes = conn.execute(
             """SELECT c.id, c.name, c.class_date, c.class_time, c.end_time, c.faculty,
@@ -775,7 +787,7 @@ def recognize_face():
             ).fetchone()
         if class_row is None:
             return jsonify({"recognized": False, "error": "Class not found."}), 404
-        now = datetime.datetime.now()
+        now = get_current_time()
         class_date = class_row["class_date"]
         class_start = datetime.datetime.combine(
             datetime.date.fromisoformat(class_date),
@@ -807,13 +819,13 @@ def recognize_face():
         student_id, similarity = predict_with_model(model, embedding)
         if similarity < 0.363:
             return jsonify({"recognized": False, "similarity": float(similarity)})
-        timestamp = datetime.datetime.now(datetime.timezone.utc)
+        timestamp = get_current_time()
         today = timestamp.date().isoformat()
         with connect_db() as conn:
             student = conn.execute("SELECT name FROM students WHERE id = ?", (int(student_id),)).fetchone()
             if student is None:
                 return jsonify({"recognized": False, "error": "Recognized student no longer exists."}), 404
-            if class_end is not None and datetime.datetime.now() >= class_end:
+            if class_end is not None and get_current_time() >= class_end:
                 return jsonify(
                     {
                         "recognized": False,
@@ -866,7 +878,7 @@ def attendance_record():
         if not class_id_value.isdigit() or int(class_id_value) < 1:
             abort(400, description="class_id must be a positive integer")
         class_id = int(class_id_value)
-    today = datetime.datetime.now(datetime.timezone.utc).date()
+    today = get_current_date()
     query = """SELECT a.id, a.student_id, a.name, a.timestamp, c.name AS class_name
                FROM attendance a LEFT JOIN classes c ON c.id = a.class_id"""
     conditions = []
